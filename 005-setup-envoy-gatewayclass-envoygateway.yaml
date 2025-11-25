@@ -1,0 +1,51 @@
+##### install Certbot ##########
+#
+#apt install certbot -y
+#
+####### Gen Cert
+#
+#certbot -d '*.apps.milkylab2.dedyn.io' --manual --preferred-challenges dns certonly
+#
+######## Create TLS Secret ###############
+#
+#kubectl create secret tls my-tls --cert=fullchain.pem --key=privkey.pem -n my-namespace
+#
+#### cluster Scope, not use namespace 
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: gateway-01
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gateway-01
+  namespace: envoy-gateway-system
+spec:
+  gatewayClassName: gateway-01
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+#      allowedRoutes:
+#        namespaces:
+#          from: All        
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: s3gw1-tls
+            kind: Secret
+#      allowedRoutes:
+#        namespaces:
+#          from: Selector
+#          selector:
+#            matchLabels:
+#              gateway: "gateway-01"
+      allowedRoutes:
+        namespaces:
+          from: All
