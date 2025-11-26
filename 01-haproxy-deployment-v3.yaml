@@ -1,0 +1,261 @@
+####### HAproxy ConfigMap ##########
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ceph-rgw-01-config
+  namespace: test-haproxy-01
+data:
+  haproxy.cfg: |
+    global
+      log stdout format raw local0
+      maxconn 5000
+
+    defaults
+      log global
+      #mode http
+      mode tcp
+      #option httplog
+      option tcplog
+      option dontlognull
+      timeout connect 5s
+      timeout client  60s
+      timeout server  60s
+      timeout http-request 10s
+      retries 3
+
+    # ============================
+    # Prometheus Metrics Endpoint
+    # ============================
+    frontend prometheus
+      bind *:9101
+      mode http
+      http-request use-service prometheus-exporter
+
+    # ============================
+    #  Frontend (receive traffic)
+    # ============================
+    frontend lb_frontend
+      bind *:80
+      mode tcp
+    # ACL แยก health check
+      acl is_probe hdr(User-Agent) -i kube-probe
+      acl is_fw_health path_beg /health
+      acl is_metrics path_beg /metrics
+      use_backend lb_backend_health if is_probe or is_fw_health or is_metrics      
+      default_backend lb_backend
+
+    # ============================
+    #  Backend (ceph rgw gateway replicas)
+    # ============================
+    backend lb_backend
+      mode tcp
+      balance roundrobin
+
+      # ---- Active Health Check ----
+      #option httpchk GET /api/health
+      #http-check expect status 200
+      #mode tcp
+
+      # Backend nodes
+      server ceph-rgw-01 172.16.50.241:8080 check
+      server ceph-rgw-02 172.16.50.242:8080 check
+      server ceph-rgw-03 172.16.50.243:8080 check
+      #server grafana2 grafana-ha2:3000 check
+      #server grafana3 grafana-ha3:3000 check
+
+    # ============================
+    #  Backend (ceph rgw gateway replicas heatch check)
+    # ============================
+    backend lb_backend_health
+      mode tcp
+      balance roundrobin
+
+      # Health check tuning
+      default-server inter 3s fall 3 rise 2
+
+      server ceph-rgw-01 172.16.50.241:8080 check inter 3s fall 3 rise 2
+      server ceph-rgw-02 172.16.50.242:8080 check inter 3s fall 3 rise 2
+      server ceph-rgw-03 172.16.50.243:8080 check inter 3s fall 3 rise 2
+
+    # ============================
+    #  Stats Dashboard
+    # ============================
+    listen stats
+      bind :8404
+      mode http
+      stats enable
+      stats uri /stats
+      stats refresh 5s
+      stats auth admin:admin   # username : pass เปลี่ยนได้
+
+############### HAproxy Service (SVC) ############################ 
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ceph-rgw-01
+  namespace: test-haproxy-01
+  labels:
+    app: ceph-rgw-01
+spec:
+  selector:
+    app: ceph-rgw-01
+  #type: ClusterIP
+  type: NodePort
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+    - name: stats
+      port: 8404
+      targetPort: 8404
+    - name: metrics
+      port: 9101
+      targetPort: 9101
+
+################### HAproxy Deployment ###################################
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ceph-rgw-01
+  namespace: test-haproxy-01
+  labels:
+    app: ceph-rgw-01
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ceph-rgw-01
+  template:
+    metadata:
+      labels:
+        app: ceph-rgw-01
+      annotations:
+        reloader.stakater.com/match: "true"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - ceph-rgw-01
+                topologyKey: "kubernetes.io/hostname"
+      containers:
+        - name: haproxy
+          image: haproxy:2.8
+          args:
+            - "-f"
+            - "/usr/local/etc/haproxy/haproxy.cfg"
+          ports:
+            - name: http
+              containerPort: 80
+            - name: stats
+              containerPort: 8404
+          volumeMounts:
+            - name: haproxy-config
+              mountPath: /usr/local/etc/haproxy/haproxy.cfg
+              subPath: haproxy.cfg
+         #readinessProbe:
+         #   httpGet:
+         #     path: /healthz
+         #     port: 8404
+         #   initialDelaySeconds: 2
+         #   periodSeconds: 5
+         # livenessProbe:
+         #   httpGet:
+         #     path: /healthz
+         #     port: 8404
+         #   initialDelaySeconds: 5
+         #   periodSeconds: 10
+      volumes:
+        - name: haproxy-config
+          configMap:
+            name: ceph-rgw-01-config
+
+################# Prometheus Scrape by ServiceMonitor #########################
+#---
+#apiVersion: monitoring.coreos.com/v1
+#kind: ServiceMonitor
+#metadata:
+#  labels:
+#    release: prometheus
+#  name: haproxy-monitor-01
+#  namespace: monitoring # ห้ามเปลี่ยน
+#spec:
+#  selector:
+#    matchLabels:
+#      app: test-haproxy-01
+#  namespaceSelector:
+#    matchNames:
+#      - test-haproxy-01
+#  endpoints:
+#    - port: metrics # port name จาก svc 
+#      path: / # haproxy exporter not use /metrics path
+#      interval: 10s  
+#
+################# ScrapeCOnfig ####################
+---
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: ScrapeConfig
+metadata:
+  labels:
+    release: prometheus
+  name: ceph-rgw-01
+  namespace: monitoring
+spec:
+  staticConfigs:
+    - targets:
+        - ceph-rgw-01.test-haproxy-01.svc.cluster.local:9101   # ← ใส่ IP ของ node exporter (ตัวอย่าง)
+#        #- 10.10.10.12:9100   # ← เพิ่มได้หลายตัว
+      labels:
+        haproxy-name: ceph-rgw-01   # ← label ที่คุณใช้ใน relabeling
+        customer-name: mek-ols
+        service-level: prd
+        envoy-gateway-name: gateway-01
+  metricsPath: /
+#  relabelings:
+#    - action: replace
+#      regex: (.*)
+#      sourceLabels:
+#        - __address__
+#      targetLabel: instance
+#    - action: replace
+#      regex: (.*)
+#      sourceLabels:
+#        - vmname
+#      targetLabel: instance        
+#
+#
+################# httpRoute ########################
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ceph-rgw-01
+  namespace: test-haproxy-01  
+spec:
+  parentRefs:
+    - name: gateway-01
+      namespace: envoy-gateway-system
+  hostnames:
+    - "ceph-rgw-01.s3gw1.olsdemo.com"
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: ceph-rgw-01
+          port: 80
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
