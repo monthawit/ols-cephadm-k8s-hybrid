@@ -1,0 +1,59 @@
+#### cluster Scope, not use namespace 
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: serverless-gateway
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: serverless-gateway
+    namespace: envoy-gateway-system    
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: serverless-gateway
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        replicas: 2
+        pod:
+          nodeSelector:
+            workload: serverless          
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: serverless-gateway
+  namespace: envoy-gateway-system
+spec:
+  gatewayClassName: serverless-gateway
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80  
+      allowedRoutes:
+        namespaces:
+          from: All        
+    - name: https
+      protocol: HTTPS
+      port: 443  
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: default-serverless-gateway-tls
+            kind: Secret
+#      allowedRoutes:
+#        namespaces:
+#          from: Selector
+#          selector:
+#            matchLabels:
+#              gateway: "gateway-01"
+      allowedRoutes:
+        namespaces:
+          from: All
